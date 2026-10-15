@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: myengine-player-identity
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:application --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 40
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: myengine-players
+          property: connectionString
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: SMS_ENABLED
+        value: "false"
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_VERIFY_SERVICE_SID
+        sync: false
+databases:
+  - name: myengine-players
+    plan: free
+    databaseName: myengine_players
+    user: myengine_players

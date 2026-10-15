@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MyEngine — проверка игрока</title><link rel="stylesheet" href="/verify.css"><script src="/verify.js" defer></script></head>
+<body><main><p class="brand">MYENGINE · PLAYER CHECK</p><h1>Сначала проверим,<br>что это ты.</h1><p class="intro">Открой проверку из игры после выбора сертификата. Продолжить сможет зарегистрированный игрок с привязанным телефоном.</p>
+<form id="phone-form"><label for="phone">Телефон, привязанный к игроку</label><input id="phone" name="phone" type="tel" autocomplete="tel" placeholder="+код страны и номер" maxlength="16" required><p class="hint">Код придёт на этот номер. Отправка — только по кнопке ниже.</p><button id="send">Получить SMS-код</button></form>
+<form id="code-form" hidden><label for="code">Код из SMS</label><input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,10}" maxlength="10" required><button id="check">Подтвердить и вернуться в игру</button></form>
+<p id="status" role="status" aria-live="polite"></p><p class="foot">Проверка телефона подтверждает доступ к учётной записи игрока. Списаний и покупок на этой странице нет.</p></main></body></html>
