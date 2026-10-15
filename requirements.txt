@@ -1,2 +1,3 @@
 gunicorn>=23,<24
 psycopg[binary]>=3.2,<4
+cryptography>=43,<47

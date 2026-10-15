@@ -26,11 +26,15 @@ def main():
         print('Player and certificate registered. No SMS was sent.')
     elif args.operation=='revoke-player':
         if not args.player:parser.error('--player is required')
-        with database.transaction() as tx:tx.execute('UPDATE players SET active=0 WHERE id=?',(args.player,))
+        with database.transaction() as tx:
+            tx.execute('UPDATE players SET active=0 WHERE id=?',(args.player,))
+            tx.execute("UPDATE sessions SET state='expired',expires=0 WHERE player=?",(args.player,))
         print('Player revoked.')
     else:
         if not args.certificate:parser.error('--certificate is required')
-        with database.transaction() as tx:tx.execute('UPDATE certificates SET active=0 WHERE id=?',(args.certificate,))
+        with database.transaction() as tx:
+            tx.execute('UPDATE certificates SET active=0 WHERE id=?',(args.certificate,))
+            tx.execute("UPDATE sessions SET state='expired',expires=0 WHERE certificate=?",(args.certificate,))
         print('Certificate revoked.')
 
 if __name__=='__main__':main()

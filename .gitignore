@@ -1,0 +1,8 @@
+private-config/
+.env
+.env.*
+*.sqlite
+*.db
+__pycache__/
+*.pyc
+*.certificate.json

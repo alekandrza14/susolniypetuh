@@ -15,11 +15,17 @@ services:
         sync: false
       - key: SMS_ENABLED
         value: "false"
-      - key: TWILIO_ACCOUNT_SID
+      - key: SMS_PROVIDER
+        value: phone
+      - key: GATEWAY_TOKEN_HASH
         sync: false
-      - key: TWILIO_AUTH_TOKEN
+      - key: OTP_KEY
         sync: false
-      - key: TWILIO_VERIFY_SERVICE_SID
+      - key: OWNER_PLAYER_ID
+        sync: false
+      - key: OWNER_PHONE
+        sync: false
+      - key: OWNER_PASSWORD_HASH
         sync: false
 databases:
   - name: myengine-players
