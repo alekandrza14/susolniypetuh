@@ -1,4 +1,4 @@
-"""Player registry + Twilio Verify. No public registration or payment claims."""
+"""Player registry, optional registration, owner password and phone verification."""
 import base64
 from contextlib import contextmanager
 import hashlib
@@ -17,7 +17,7 @@ from urllib.request import Request,build_opener,HTTPSHandler,HTTPRedirectHandler
 ROOT=Path(__file__).resolve().parent
 
 class Problem(Exception):
-    def __init__(self,status,message):self.status=status;self.message=message
+    def __init__(self,status,message,details=None):self.status=status;self.message=message;self.details=details or {}
 
 def ident(value,limit=100):
     if not isinstance(value,str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,'+str(limit)+'}',value):raise Problem(400,'Некорректные данные')
@@ -86,8 +86,10 @@ class Database:
             if existing and existing['phone']!=number:raise ValueError('Player already has another phone; use an explicit administrative account recovery process')
             old=tx.one('SELECT player,product FROM certificates WHERE id=?',(certificate,))
             if old and (old['player']!=player or old['product']!=product):raise ValueError('Certificate already belongs to another player/product')
-            tx.execute('INSERT INTO players(id,phone,active) VALUES(?,?,1) ON CONFLICT(id) DO UPDATE SET active=1',(player,number))
-            tx.execute('INSERT INTO certificates(id,player,product,active) VALUES(?,?,?,1) ON CONFLICT(id) DO UPDATE SET active=1',(certificate,player,product))
+            row=tx.one('INSERT INTO players(id,phone,active) VALUES(?,?,1) ON CONFLICT(id) DO UPDATE SET active=1 WHERE players.phone=EXCLUDED.phone RETURNING id',(player,number))
+            if row is None:raise ValueError('Player already has another phone')
+            row=tx.one('INSERT INTO certificates(id,player,product,active) VALUES(?,?,?,1) ON CONFLICT(id) DO UPDATE SET active=1 WHERE certificates.player=EXCLUDED.player AND certificates.product=EXCLUDED.product RETURNING id',(certificate,player,product))
+            if row is None:raise ValueError('Certificate already belongs to another player/product')
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs):raise Problem(502,'Ошибка SMS-провайдера')
@@ -148,7 +150,10 @@ class PhoneGateway:
             for _ in range(20):
                 job=tx.one("SELECT * FROM sms_jobs WHERE state='queued' AND expires>? ORDER BY created,id LIMIT 1"+(' FOR UPDATE SKIP LOCKED' if tx.postgres else ''),(now,))
                 if job is None:return {'job':None}
-                eligible=tx.one("SELECT p.phone FROM sessions s JOIN players p ON p.id=s.player JOIN certificates c ON c.id=s.certificate AND c.player=s.player AND c.product=s.product WHERE s.id=? AND s.verification=? AND s.state='pending' AND s.expires>? AND p.active=1 AND c.active=1",(job['session_id'],'GQ-'+job['id'],now))
+                if job['session_id'].startswith('R-'):
+                    eligible=tx.one("SELECT phone FROM registration_requests WHERE id=? AND verification=? AND state='unverified' AND expires>?",(job['session_id'][2:],'GQ-'+job['id'],now))
+                else:
+                    eligible=tx.one("SELECT p.phone FROM sessions s JOIN players p ON p.id=s.player JOIN certificates c ON c.id=s.certificate AND c.player=s.player AND c.product=s.product WHERE s.id=? AND s.verification=? AND s.state='pending' AND s.expires>? AND p.active=1 AND c.active=1",(job['session_id'],'GQ-'+job['id'],now))
                 if not eligible or eligible['phone']!=job['number']:
                     tx.execute("UPDATE sms_jobs SET state='canceled',otp_cipher='',otp_hash='' WHERE id=?",(job['id'],));continue
                 code=self.cipher.decrypt(job['otp_cipher'].encode()).decode();claim=secrets.token_urlsafe(32)
@@ -177,7 +182,7 @@ class IdentityService:
         parsed=urlsplit(public_url)
         if parsed.scheme!='https' or not parsed.netloc or parsed.path not in ('','/') or parsed.query or parsed.fragment or parsed.username:
             raise RuntimeError('PUBLIC_BASE_URL must be an HTTPS origin without path')
-        self.db=database;self.provider=provider;self.public_url=public_url.rstrip('/');self.enabled=enabled;self.now=now;self.owner=owner
+        self.db=database;self.provider=provider;self.public_url=public_url.rstrip('/');self.enabled=enabled;self.now=now;self.owner=owner;self.registration=None
         if owner:
             ident(owner.get('player'),32);phone(owner.get('phone'))
             if not valid_password_hash(owner.get('hash')):raise RuntimeError('Invalid OWNER_PASSWORD_HASH; use setup_secrets.py')
@@ -201,7 +206,11 @@ class IdentityService:
             tx.limit('sessions:'+digest(remote),600,40,now)
             tx.limit('sessions-global',3600,300,now)
         with self.db.transaction() as tx:
-            number=self.eligible(tx,player,product,certificate)
+            try:number=self.eligible(tx,player,product,certificate)
+            except Problem as error:
+                if self.registration and self.registration.settings(tx)['mode']!='closed':
+                    raise Problem(403,'Откройте регистрацию игрока на сайте.',{'code':'registration_required','registrationUrl':self.public_url+'/register'}) from None
+                raise
             if not self.is_owner(player,number) and (not self.enabled or self.provider is None):raise Problem(503,'SMS-проверка ещё не подключена автором игры')
             tx.limit('player-sessions:'+player,600,10,now)
             tx.execute('DELETE FROM sessions WHERE expires<?',(now-86400,))
@@ -295,8 +304,10 @@ class Application:
             path=environ.get('PATH_INFO','/');method=environ.get('REQUEST_METHOD','GET')
             headers=[('Cache-Control','no-store'),('X-Content-Type-Options','nosniff'),('Referrer-Policy','no-referrer'),
                      ('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")]
-            if method=='GET' and path in ('/','/verify','/verify.js','/verify.css'):
-                file={'/':'index.html','/verify':'index.html','/verify.js':'verify.js','/verify.css':'verify.css'}[path]
+            static={'/':'index.html','/verify':'index.html','/verify.js':'verify.js','/verify.css':'verify.css',
+                    '/register':'register.html','/register.js':'register.js','/moderation':'moderation.html','/moderation.js':'moderation.js'}
+            if method=='GET' and path in static:
+                file=static[path]
                 kind='text/html' if file.endswith('.html') else 'text/javascript' if file.endswith('.js') else 'text/css'
                 raw=(ROOT/'static'/file).read_bytes();headers.append(('Content-Type',kind+'; charset=utf-8'));status=200
             else:
@@ -314,6 +325,7 @@ class Application:
                 elif method=='POST' and path=='/api/sessions':result=self.service.create(data,environ.get('REMOTE_ADDR','unknown'))
                 elif method=='POST' and path=='/api/gateway/claim':result=self.service.gateway(token)
                 elif method=='POST' and job_match:result=self.service.gateway(token,job_match[1],data)
+                elif self.service.registration and path.startswith(('/api/registration','/api/moderation')):result=self.service.registration.route(method,path,token,data,environ.get('REMOTE_ADDR','unknown'))
                 elif match:
                     sid,action=match.groups()
                     if method=='GET' and action is None:result=self.service.status(sid,token)
@@ -323,7 +335,7 @@ class Application:
                     else:raise Problem(405,'Метод не поддерживается')
                 else:raise Problem(404,'Не найдено')
                 raw=json.dumps(result,ensure_ascii=False).encode();headers.append(('Content-Type','application/json; charset=utf-8'));status=200
-        except Problem as error:status=error.status;raw=json.dumps({'error':error.message},ensure_ascii=False).encode();headers=[('Content-Type','application/json; charset=utf-8'),('Cache-Control','no-store')]
+        except Problem as error:status=error.status;raw=json.dumps({'error':error.message,**error.details},ensure_ascii=False).encode();headers=[('Content-Type','application/json; charset=utf-8'),('Cache-Control','no-store')]
         except (ValueError,UnicodeError,KeyError):status=400;raw=b'{"error":"Invalid request"}';headers=[('Content-Type','application/json'),('Cache-Control','no-store')]
         except Exception:status=503;raw=b'{"error":"Service temporarily unavailable"}';headers=[('Content-Type','application/json'),('Cache-Control','no-store')]
         headers.append(('Content-Length',str(len(raw))));start_response(str(status)+' '+{200:'OK',400:'Bad Request',403:'Forbidden',404:'Not Found',405:'Method Not Allowed',409:'Conflict',413:'Payload Too Large',415:'Unsupported Media Type',429:'Too Many Requests',502:'Bad Gateway',503:'Service Unavailable'}.get(status,'Error'),headers)
@@ -339,4 +351,7 @@ def from_environment():
     if enabled:
         provider=PhoneGateway(database,os.environ.get('GATEWAY_TOKEN_HASH'),os.environ.get('OTP_KEY','')) if mode=='phone' else TwilioVerify(os.environ.get('TWILIO_ACCOUNT_SID'),os.environ.get('TWILIO_AUTH_TOKEN'),os.environ.get('TWILIO_VERIFY_SERVICE_SID'))
     owner={name:os.environ.get(key,'') for name,key in [('player','OWNER_PLAYER_ID'),('phone','OWNER_PHONE'),('hash','OWNER_PASSWORD_HASH')]}
-    return Application(IdentityService(database,provider,os.environ['PUBLIC_BASE_URL'],enabled=enabled,owner=owner if any(owner.values()) else None))
+    service=IdentityService(database,provider,os.environ['PUBLIC_BASE_URL'],enabled=enabled,owner=owner if any(owner.values()) else None)
+    from registration import Registration
+    service.registration=Registration(service)
+    return Application(service)

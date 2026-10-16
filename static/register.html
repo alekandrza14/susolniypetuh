@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Регистрация игрока · MyEngine</title><link rel="stylesheet" href="/verify.css"><script src="/register.js" defer></script></head>
+<body><main><p class="brand">MYENGINE · НОВЫЙ ИГРОК</p><h1>Присоединиться<br>к игре.</h1><p class="intro" id="mode">Проверяем, открыта ли регистрация…</p>
+<form id="registration-form" hidden><label for="certificate">Сертификат из игры (.json)</label><input id="certificate" type="file" accept=".json,application/json"><p class="hint" id="certificate-info">Выбери тот же файл, который загружаешь в игре.</p>
+<label for="phone">Твой телефон</label><input id="phone" type="tel" autocomplete="tel" placeholder="+код страны и номер" maxlength="16" required>
+<label for="email">Email для связи — необязательно</label><input id="email" type="email" autocomplete="email" maxlength="254">
+<label for="note">Сообщение автору — необязательно</label><textarea id="note" rows="3" maxlength="500"></textarea><button id="submit">Продолжить</button></form>
+<form id="code-form" hidden><label for="code">Код из SMS</label><input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,10}" maxlength="10" required><button>Подтвердить телефон</button></form>
+<button id="refresh" hidden>Проверить решение автора</button><p id="status" role="status" aria-live="polite"></p><p class="foot">После регистрации вернись в игру и выбери этот же сертификат. Регистрация не подтверждает оплату.</p><nav><a href="/">Вход игрока</a><a href="/moderation">Я автор игры</a></nav></main></body></html>
