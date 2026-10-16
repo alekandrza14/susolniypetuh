@@ -28,7 +28,13 @@ $('registration-form').addEventListener('submit',event=>{
     request=await api('/api/registrations',{certificate,phone:$('phone').value.trim(),email:$('email').value.trim(),note:$('note').value});
     $('registration-form').hidden=true;
     if(request.status==='code_required'){$('code-form').hidden=false;$('code').focus();$('status').textContent='Отправлен запрос на SMS. Введи код, который придёт на твой номер.';}
-    else{$('refresh').hidden=false;$('status').textContent='Заявка сохранена. Дождись одобрения автора. Можно оставить эту вкладку открытой или позднее повторить вход из игры.';}
+    else{
+      const draft=request.emailDraft;
+      if(!draft||typeof draft.href!=='string'||!draft.href.startsWith('mailto:'))throw Error('Заявка сохранена, но письмо не подготовлено. Обратись к автору.');
+      $('mail-to').value=draft.to;$('mail-subject').value=draft.subject;$('mail-body').value=draft.body;
+      $('write-email').href=draft.href;$('email-draft').hidden=false;$('refresh').hidden=false;
+      $('status').textContent='Заявка сохранена. Теперь отправь письмо #verify автору. Письмо ещё не отправлено, доступ ожидает одобрения.';
+    }
   });
 });
 $('code-form').addEventListener('submit',event=>{
@@ -43,9 +49,13 @@ $('refresh').addEventListener('click',()=>action($('refresh'),async()=>{
   $('status').textContent=labels[result.status]||'Заявка обрабатывается.';
   if(['approved','rejected','expired'].includes(result.status))$('refresh').hidden=true;
 }));
+$('copy-email').addEventListener('click',()=>action($('copy-email'),async()=>{
+  try{await navigator.clipboard.writeText($('mail-body').value);$('status').textContent='Текст скопирован. Вставь его в письмо с темой #verify и отправь автору.';}
+  catch{$('mail-body').focus();$('mail-body').select();$('status').textContent='Текст выделен. Нажми Ctrl+C или выбери «Копировать».';}
+}));
 api('/api/registration/config').then(config=>{
   if(config.mode==='closed'){$('mode').textContent='Автор пока не открыл регистрацию. Если у тебя уже есть доступ, начни вход из игры.';return;}
   $('registration-form').hidden=false;
-  $('mode').textContent=config.mode==='approval'?'Отправь заявку. Автор проверит её и разрешит вход. Телефон будет проверен по SMS при входе.':'Подтверди телефон по SMS, чтобы получить свободный доступ. Доступные товары: '+config.products.join(', ')+'.';
-  $('submit').textContent=config.mode==='approval'?'Отправить заявку автору':'Получить SMS-код';
+  $('mode').textContent=config.mode==='approval'?'Подготовь письмо с темой #verify и отправь его автору из своей почты. Автор рассмотрит заявку. Телефон будет проверен по SMS при входе.':'Подтверди телефон по SMS, чтобы получить свободный доступ. Доступные товары: '+config.products.join(', ')+'.';
+  $('submit').textContent=config.mode==='approval'?'Подготовить письмо #verify':'Получить SMS-код';
 }).catch(e=>{$('mode').textContent='Не удалось загрузить настройки регистрации.';$('status').textContent=e.message;});

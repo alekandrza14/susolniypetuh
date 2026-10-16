@@ -1,13 +1,14 @@
 """Opt-in player registration; never treats a client certificate as payment proof."""
-from datetime import datetime, timezone
+from datetime import datetime
 import hmac
 import json
-import os
 import re
 import secrets
-from urllib.request import Request, build_opener, HTTPSHandler
-from identity_server import Problem, PhoneGateway, NoRedirect, ident, phone, digest, password_matches
+from urllib.parse import quote
+from identity_server import Problem, PhoneGateway, ident, phone, digest, password_matches
 
+
+DEFAULT_CONTACT='alekandrza14@gmail.com'
 
 def email(value, optional=False):
     if optional and not value:return ''
@@ -43,27 +44,9 @@ def grant(tx, player, number, product, certificate, *, reactivate=False):
     if row is None:raise Problem(409,'Сертификат заблокирован или уже привязан к другому игроку / товару.')
 
 
-class EmailSender:
-    def __init__(self,key='',sender=''):self.key=key;self.sender=sender
-    @property
-    def configured(self):
-        try:email(self.sender);return bool(self.key)
-        except Problem:return False
-    def send(self,rid,payload):
-        if not self.configured:return 'not_configured'
-        request=Request('https://api.resend.com/emails',data=payload.encode(),headers={
-            'Authorization':'Bearer '+self.key,'Content-Type':'application/json','Idempotency-Key':'myengine-registration-'+rid})
-        try:
-            with build_opener(HTTPSHandler(),NoRedirect()).open(request,timeout=12) as response:
-                result=json.loads(response.read(65536))
-            return 'accepted' if result.get('id') else 'failed'
-        except Exception:return 'failed'
-
-
 class Registration:
-    def __init__(self,service,mailer=None):
+    def __init__(self,service):
         self.service=service;self.db=service.db;self.now=service.now
-        self.mailer=mailer or EmailSender(os.environ.get('RESEND_API_KEY',''),os.environ.get('EMAIL_FROM',''))
         with self.db.transaction() as tx:
             tx.execute("CREATE TABLE IF NOT EXISTS registration_settings(id INTEGER PRIMARY KEY,mode TEXT NOT NULL,products TEXT NOT NULL,notify INTEGER NOT NULL,recipient TEXT NOT NULL)")
             tx.execute("INSERT INTO registration_settings VALUES(1,'closed','[]',0,'') ON CONFLICT(id) DO NOTHING")
@@ -74,7 +57,7 @@ class Registration:
         if tx is None:
             with self.db.transaction() as tx:return self.settings(tx)
         r=tx.one('SELECT * FROM registration_settings WHERE id=1')
-        return {'mode':r['mode'],'products':json.loads(r['products']),'notify':bool(r['notify']),'recipient':r['recipient']}
+        return {'mode':r['mode'],'products':json.loads(r['products']),'recipient':r['recipient'] or DEFAULT_CONTACT}
     def public_config(self):
         s=self.settings()
         return {'mode':s['mode'],'products':s['products'] if s['mode']=='automatic' else [],'smsEnabled':self.service.enabled}
@@ -95,16 +78,16 @@ class Registration:
         if not isinstance(token,str) or not 32<=len(token)<=128:raise Problem(403,'Войдите владельцем')
         if not tx.one('SELECT token_hash FROM owner_sessions WHERE token_hash=? AND expires>?',(digest(token),int(self.now()))):raise Problem(403,'Войдите владельцем заново')
     def save_settings(self,token,data):
-        mode=data.get('mode');products=data.get('products',[]);notify=data.get('notify',False)
-        if mode not in ('closed','automatic','approval') or not isinstance(products,list) or len(products)>50 or not isinstance(notify,bool):raise Problem(400,'Некорректные настройки')
+        mode=data.get('mode');products=data.get('products',[])
+        if mode not in ('closed','automatic','approval') or not isinstance(products,list) or len(products)>50:raise Problem(400,'Некорректные настройки')
         products=list(dict.fromkeys(ident(p) for p in products))
-        recipient=email(data.get('recipient',''),optional=not notify)
+        recipient=email(data.get('recipient') or DEFAULT_CONTACT)
         if mode=='automatic' and not products:raise Problem(400,'Укажите товары, доступ к которым разрешено выдавать бесплатно')
         if mode=='automatic' and (not self.service.enabled or self.service.provider is None):raise Problem(400,'Для свободной регистрации сначала включите SMS-проверку на сервере')
         with self.db.transaction() as tx:
             self.authorize(tx,token)
-            tx.execute('UPDATE registration_settings SET mode=?,products=?,notify=?,recipient=? WHERE id=1',(mode,json.dumps(products),int(notify),recipient))
-        return {'status':'saved','mailConfigured':self.mailer.configured}
+            tx.execute('UPDATE registration_settings SET mode=?,products=?,notify=?,recipient=? WHERE id=1',(mode,json.dumps(products),0,recipient))
+        return {'status':'saved'}
     def conflicts(self,tx,player,product,cert,number):
         owner=self.service.owner
         if owner and (player==owner['player'] or number==owner['phone']):raise Problem(403,'Для владельца используйте вход по паролю')
@@ -132,6 +115,7 @@ class Registration:
             if automatic and (not self.service.enabled or self.service.provider is None):raise Problem(503,'SMS-проверка сейчас отключена')
             state='unverified' if automatic else 'pending';end=now+(600 if automatic else 604800)
             if expiry is not None:end=min(end,int(expiry))
+            # Keep legacy columns for compatible, non-destructive upgrades.
             verification='';mail_status='off';payload=''
             if automatic:
                 tx.limit('sms-global',86400,100,now)
@@ -139,11 +123,6 @@ class Registration:
                 if isinstance(self.service.provider,PhoneGateway):
                     verification=self.service.provider.enqueue(tx,{'id':'R-'+rid,'expires':end},number,now)
                 else:state='sending'
-            elif s['notify']:
-                mail_status='waiting'
-                payload=json.dumps({'from':self.mailer.sender,'to':[s['recipient']],
-                    'subject':'MyEngine: заявка на регистрацию '+rid[:8],
-                    'text':'Игрок хочет зарегистрироваться.\nЗаявка: '+rid+'\nИгрок: '+player+'\nТовар: '+product+'\nСертификат: '+cert+'\nТелефон (не подтверждён): '+number+'\nEmail: '+contact+'\nКомментарий: '+note+'\n\nРешение: '+self.service.public_url+'/moderation\nЗаявка не подтверждает оплату.'},ensure_ascii=False)
             tx.execute('INSERT INTO registration_requests(id,player,product,certificate,phone,email,note,state,created,expires,certificate_expiry,web_hash,verification,mail_status,mail_payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (rid,player,product,cert,number,contact,note,state,now,end,expiry,digest(token),verification,mail_status,payload))
         if state=='sending':
@@ -153,8 +132,11 @@ class Registration:
             except Exception:
                 with self.db.transaction() as tx:tx.execute("UPDATE registration_requests SET state='failed' WHERE id=? AND state='sending'",(rid,))
                 raise
-        if mail_status=='waiting':mail_status=self.notify(rid)
-        return {'id':rid,'token':token,'status':'code_required' if automatic else 'pending','mailStatus':mail_status}
+        result={'id':rid,'token':token,'status':'code_required' if automatic else 'pending'}
+        if not automatic:
+            with self.db.transaction() as tx:
+                result['emailDraft']=self.email_draft(tx.one('SELECT * FROM registration_requests WHERE id=?',(rid,)),s['recipient'])
+        return result
     def request(self,tx,rid,token):
         ident(rid,32)
         r=tx.one('SELECT * FROM registration_requests WHERE id=?'+(' FOR UPDATE' if tx.postgres else ''),(rid,))
@@ -191,34 +173,37 @@ class Registration:
             raise
         if not approved:raise Problem(400,'Код неверен')
         return {'status':'approved'}
-    def notify(self,rid):
-        with self.db.transaction() as tx:
-            r=tx.one('SELECT * FROM registration_requests WHERE id=?'+(' FOR UPDATE' if tx.postgres else ''),(rid,))
-            if not r or r['mail_status'] not in ('waiting','failed','not_configured'):return r['mail_status'] if r else 'off'
-            # Resend deduplicates for 24 hours. Never retry beyond that window.
-            if r['created']<self.now()-82800:return 'retry_expired'
-            tx.execute("UPDATE registration_requests SET mail_status='sending' WHERE id=?",(rid,))
-            payload=r['mail_payload']
-            if r['mail_status']=='not_configured' or not json.loads(payload).get('from'):
-                value=json.loads(payload);value['from']=self.mailer.sender;payload=json.dumps(value,ensure_ascii=False)
-                tx.execute('UPDATE registration_requests SET mail_payload=? WHERE id=?',(payload,rid))
-        result=self.mailer.send(rid,payload)
-        with self.db.transaction() as tx:tx.execute('UPDATE registration_requests SET mail_status=? WHERE id=?',(result,rid))
-        return result
+    def email_draft(self,r,recipient):
+        recipient=email(recipient)
+        subject='#verify — регистрация игрока '+r['player']
+        body='\r\n'.join([
+            'Здравствуйте! Хочу зарегистрироваться в игре.',
+            'Заявка: '+r['id'],'ID игрока: '+r['player'],'Товар: '+r['product'],
+            'Сертификат: '+r['certificate'],'Телефон для входа: '+r['phone'],
+            'Email для ответа: '+(r['email'] or '[адрес, с которого отправляю письмо]'),
+            '', 'Игровой ник: [укажи ник]',
+            'Страница Steam — по желанию: [ссылка]',
+            'Купленные игры, которые хочу указать — по желанию: [список]',
+            'Основание для доступа / номер заказа: [укажи, если требуется]',
+            'Почему хочу зарегистрироваться: '+(r['note'] or '[напиши кратко]'),
+            '', 'Кабинет автора для рассмотрения: '+self.service.public_url+'/moderation',
+            'Открытие и отправка письма сами по себе не выдают доступ.'
+        ])
+        return {'to':recipient,'subject':subject,'body':body,
+            'href':'mailto:'+quote(recipient,safe='@')+'?subject='+quote(subject,safe='')+'&body='+quote(body,safe='')}
     def overview(self,token):
         with self.db.transaction() as tx:
             self.authorize(tx,token);s=self.settings(tx)
             cursor=tx.execute("SELECT id,player,product,certificate,phone,email,note,state,created,expires,mail_status FROM registration_requests WHERE state='pending' AND expires>? ORDER BY created LIMIT 100",(int(self.now()),))
             names=[c[0] for c in cursor.description];requests=[dict(zip(names,row)) for row in cursor.fetchall()]
-        return {'settings':s,'requests':requests,'mailConfigured':self.mailer.configured}
+        return {'settings':s,'requests':requests}
     def decide(self,token,rid,action):
         ident(rid,32)
         with self.db.transaction() as tx:
             self.authorize(tx,token)
             r=tx.one('SELECT * FROM registration_requests WHERE id=?'+(' FOR UPDATE' if tx.postgres else ''),(rid,))
             if not r:raise Problem(404,'Заявка не найдена')
-            if action=='retry-mail':pass
-            elif action in ('approve','reject'):
+            if action in ('approve','reject'):
                 target='approved' if action=='approve' else 'rejected'
                 if r['state']==target:return {'status':target}
                 if r['state']!='pending' or r['expires']<=self.now():raise Problem(409,'Заявка уже обработана или истекла')
@@ -227,7 +212,7 @@ class Registration:
                     grant(tx,r['player'],r['phone'],r['product'],r['certificate'])
                 tx.execute('UPDATE registration_requests SET state=? WHERE id=?',(target,rid))
             else:raise Problem(404,'Не найдено')
-        return {'mailStatus':self.notify(rid)} if action=='retry-mail' else {'status':target}
+        return {'status':target}
     def route(self,method,path,token,data,remote):
         if method=='GET' and path=='/api/registration/config':return self.public_config()
         if method=='POST' and path=='/api/registrations':return self.submit(data,remote)
@@ -242,6 +227,6 @@ class Registration:
         if match:
             if method=='GET' and not match[2]:return self.status(match[1],token)
             if method=='POST' and match[2]:return self.check(match[1],token,data)
-        match=re.fullmatch(r'/api/moderation/([a-f0-9]{32})/(approve|reject|retry-mail)',path)
+        match=re.fullmatch(r'/api/moderation/([a-f0-9]{32})/(approve|reject)',path)
         if method=='POST' and match:return self.decide(token,match[1],match[2])
         raise Problem(404,'Не найдено')
