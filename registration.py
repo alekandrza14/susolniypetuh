@@ -6,6 +6,7 @@ import re
 import secrets
 from urllib.parse import quote
 from identity_server import Problem, PhoneGateway, ident, phone, digest, password_matches
+from security_audit import Security,clean
 
 
 DEFAULT_CONTACT='alekandrza14@gmail.com'
@@ -31,6 +32,7 @@ def certificate_fields(value, now):
         issued=date(value.get('issuedAt'));expiry=date(value['expiresAt']) if value.get('expiresAt') else None
         if issued>now+300 or (expiry is not None and (expiry<=now or expiry<=issued)):raise ValueError()
     except (ValueError,TypeError,OverflowError):raise Problem(400,'Сертификат просрочен или содержит некорректную дату') from None
+    if value.get('grantType')=='developer':raise Problem(403,'Сертификат разработчика нельзя зарегистрировать как обычный игрок.',{'code':'developer_claim_forbidden'})
     return ident(value.get('playerId'),32),ident(value.get('productId')),ident(value.get('certificateId'),128),expiry
 
 
@@ -47,6 +49,7 @@ def grant(tx, player, number, product, certificate, *, reactivate=False):
 class Registration:
     def __init__(self,service):
         self.service=service;self.db=service.db;self.now=service.now
+        if self.service.security is None:self.service.security=Security(service)
         with self.db.transaction() as tx:
             tx.execute("CREATE TABLE IF NOT EXISTS registration_settings(id INTEGER PRIMARY KEY,mode TEXT NOT NULL,products TEXT NOT NULL,notify INTEGER NOT NULL,recipient TEXT NOT NULL)")
             tx.execute("INSERT INTO registration_settings VALUES(1,'closed','[]',0,'') ON CONFLICT(id) DO NOTHING")
@@ -75,8 +78,8 @@ class Registration:
             tx.execute('INSERT INTO owner_sessions VALUES(?,?)',(digest(token),now+3600))
         return {'token':token,'expiresAt':now+3600}
     def authorize(self,tx,token):
-        if not isinstance(token,str) or not 32<=len(token)<=128:raise Problem(403,'Войдите владельцем')
-        if not tx.one('SELECT token_hash FROM owner_sessions WHERE token_hash=? AND expires>?',(digest(token),int(self.now()))):raise Problem(403,'Войдите владельцем заново')
+        if not isinstance(token,str) or not 32<=len(token)<=128:raise Problem(403,'Войдите владельцем',{'code':'owner_session_required'})
+        if not tx.one('SELECT token_hash FROM owner_sessions WHERE token_hash=? AND expires>?',(digest(token),int(self.now()))):raise Problem(403,'Войдите владельцем заново',{'code':'owner_session_required'})
     def save_settings(self,token,data):
         mode=data.get('mode');products=data.get('products',[])
         if mode not in ('closed','automatic','approval') or not isinstance(products,list) or len(products)>50:raise Problem(400,'Некорректные настройки')
@@ -125,6 +128,7 @@ class Registration:
                 else:state='sending'
             tx.execute('INSERT INTO registration_requests(id,player,product,certificate,phone,email,note,state,created,expires,certificate_expiry,web_hash,verification,mail_status,mail_payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (rid,player,product,cert,number,contact,note,state,now,end,expiry,digest(token),verification,mail_status,payload))
+            self.service.security.claim(tx,rid,data['certificate'],data)
         if state=='sending':
             try:
                 verification=self.service.provider.send(number)
@@ -196,8 +200,16 @@ class Registration:
             self.authorize(tx,token);s=self.settings(tx)
             cursor=tx.execute("SELECT id,player,product,certificate,phone,email,note,state,created,expires,mail_status FROM registration_requests WHERE state='pending' AND expires>? ORDER BY created LIMIT 100",(int(self.now()),))
             names=[c[0] for c in cursor.description];requests=[dict(zip(names,row)) for row in cursor.fetchall()]
+            for r in requests:
+                r['claims']=tx.one('SELECT grant_type,payment_status,payment_availability,decision_reason,decision_reference FROM registration_claims WHERE request_id=?',(r['id'],)) or {'grant_type':'unknown','payment_status':'unknown','payment_availability':'unknown'}
+                r['paymentVerified']=False
+                r['certificateRole']='player_request'
+                r['flags']=['payment_not_verified']
+                if r['claims']['payment_availability']=='unavailable':r['flags'].append('payment_unavailable_reported')
+                if r['claims']['grant_type']=='developer':r['flags'].append('developer_claim_blocked')
         return {'settings':s,'requests':requests}
-    def decide(self,token,rid,action):
+    def decide(self,token,rid,action,data=None):
+        data=data or {}
         ident(rid,32)
         with self.db.transaction() as tx:
             self.authorize(tx,token)
@@ -208,6 +220,13 @@ class Registration:
                 if r['state']==target:return {'status':target}
                 if r['state']!='pending' or r['expires']<=self.now():raise Problem(409,'Заявка уже обработана или истекла')
                 if action=='approve':
+                    claims=tx.one('SELECT grant_type FROM registration_claims WHERE request_id=?',(rid,))
+                    if claims and claims['grant_type']=='developer':raise Problem(403,'Сертификат разработчика нельзя одобрить обычному игроку')
+                    reason=data.get('accessReason','manual_access')
+                    if reason not in ('manual_access','free_grant','purchase_reviewed'):raise Problem(400,'Выберите основание доступа')
+                    reference=clean(data.get('paymentReference',''),120)
+                    if reason=='purchase_reviewed' and not reference:raise Problem(400,'Укажите номер операции, которую проверили лично')
+                    tx.execute('UPDATE registration_claims SET decision_reason=?,decision_reference=? WHERE request_id=?',(reason,reference,rid))
                     self.conflicts(tx,r['player'],r['product'],r['certificate'],r['phone'])
                     grant(tx,r['player'],r['phone'],r['product'],r['certificate'])
                 tx.execute('UPDATE registration_requests SET state=? WHERE id=?',(target,rid))
@@ -217,6 +236,17 @@ class Registration:
         if method=='GET' and path=='/api/registration/config':return self.public_config()
         if method=='POST' and path=='/api/registrations':return self.submit(data,remote)
         if method=='POST' and path=='/api/moderation/login':return self.login(data,remote)
+        if path=='/api/moderation/security' and method in ('GET','POST'):
+            before=data.get('before')
+            if before is not None:
+                if not isinstance(before,dict) or type(before.get('created')) is not int or not re.fullmatch(r'[a-f0-9]{32}',str(before.get('id',''))):raise Problem(400,'Некорректная страница журнала')
+                before=(before['created'],before['id'])
+            return self.service.security.overview(token,before)
+        if method=='POST' and path=='/api/moderation/developer-certificate':return self.service.security.replace_binding(token,data)
+        if method=='POST' and path=='/api/moderation/logout-others':
+            with self.db.transaction() as tx:
+                self.authorize(tx,token);tx.execute('DELETE FROM owner_sessions WHERE token_hash<>?',(digest(token),))
+            return {'status':'ok'}
         if method=='GET' and path=='/api/moderation':return self.overview(token)
         if method=='POST' and path=='/api/moderation/settings':return self.save_settings(token,data)
         if method=='POST' and path=='/api/moderation/logout':
@@ -228,5 +258,5 @@ class Registration:
             if method=='GET' and not match[2]:return self.status(match[1],token)
             if method=='POST' and match[2]:return self.check(match[1],token,data)
         match=re.fullmatch(r'/api/moderation/([a-f0-9]{32})/(approve|reject)',path)
-        if method=='POST' and match:return self.decide(token,match[1],match[2])
+        if method=='POST' and match:return self.decide(token,match[1],match[2],data)
         raise Problem(404,'Не найдено')

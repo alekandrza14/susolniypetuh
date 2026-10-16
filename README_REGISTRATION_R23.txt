@@ -1,8 +1,10 @@
+В R24 дополнительно смотри README_SECURITY_R24.txt: журнал и защита сертификата владельца.
+
 MYENGINE R23.1 — РЕГИСТРАЦИЯ ПО ПИСЬМУ #verify, БЕЗ API-КЛЮЧЕЙ
 
 ЕСЛИ ВХОД ВЛАДЕЛЬЦА УЖЕ РАБОТАЕТ
 1. Замени файлы существующего репозитория сервера файлами из
-   MyEngine_PlayerIdentity_Server_R23.zip. app.py остаётся в корне.
+   MyEngine_PlayerIdentity_Server_R24.zip. app.py остаётся в корне.
 2. Обнови существующий сервис Render (Deploy latest commit, если автоматическое
    обновление выключено). Используй прежнюю базу DATABASE_URL и прежние значения
    OWNER_*, GATEWAY_TOKEN_HASH, OTP_KEY, PUBLIC_BASE_URL, SMS_ENABLED, SMS_PROVIDER.

@@ -9,7 +9,7 @@
   if(!match){phoneForm.hidden=true;status.textContent='Начни проверку через кнопку загрузки сертификата в игре.';return;}
   const [,session,token]=match;
   async function request(action,data){
-    const response=await fetch('/api/sessions/'+session+'/'+action,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(data),credentials:'omit',redirect:'error',cache:'no-store'});
+    const response=await fetch('/api/sessions/'+session+'/'+action,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({...data,device:window.MyEngineDevice.read()}),credentials:'omit',redirect:'error',cache:'no-store'});
     const result=await response.json();
     if(!response.ok)throw new Error(result.error||'Не удалось выполнить проверку');
     return result;

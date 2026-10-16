@@ -1,7 +1,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 let certificate=null,request=null;
-const fields=['schema','licenseStatus','grantType','signature','issuedAt','expiresAt','playerId','productId','certificateId'];
+const fields=['schema','licenseStatus','grantType','signature','issuedAt','expiresAt','playerId','productId','certificateId','payment'];
 function selectCertificate(value){
   if(!value||value.schema!=='myengine-license/v1'||!value.playerId||!value.productId||!value.certificateId)throw Error('Нужен JSON-сертификат MyEngine.');
   certificate=Object.fromEntries(fields.filter(k=>Object.hasOwn(value,k)).map(k=>[k,value[k]]));
@@ -12,7 +12,7 @@ try{
   if(hash.startsWith('#certificate=')&&hash.length<=12000)selectCertificate(JSON.parse(decodeURIComponent(hash.slice(13))));
 }catch(e){$('status').textContent='Не удалось прочитать сертификат из игры. Выбери файл вручную.';}
 async function api(path,body,token){
-  const response=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},...(body?{body:JSON.stringify(body)}:{})});
+  const response=await fetch(path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},...(body?{body:JSON.stringify({...body,device:window.MyEngineDevice.read()})}:{})});
   let result;try{result=await response.json();}catch{throw Error('Сервер недоступен. Попробуй ещё раз.');}
   if(!response.ok)throw Error(result.error||'Запрос не выполнен');return result;
 }
@@ -25,7 +25,7 @@ $('certificate').addEventListener('change',async()=>{
 $('registration-form').addEventListener('submit',event=>{
   event.preventDefault();action($('submit'),async()=>{
     if(!certificate)throw Error('Выбери сертификат из игры.');
-    request=await api('/api/registrations',{certificate,phone:$('phone').value.trim(),email:$('email').value.trim(),note:$('note').value});
+    request=await api('/api/registrations',{certificate,phone:$('phone').value.trim(),email:$('email').value.trim(),note:$('note').value,paymentAvailability:$('payment-availability').value});
     $('registration-form').hidden=true;
     if(request.status==='code_required'){$('code-form').hidden=false;$('code').focus();$('status').textContent='Отправлен запрос на SMS. Введи код, который придёт на твой номер.';}
     else{
@@ -55,7 +55,7 @@ $('copy-email').addEventListener('click',()=>action($('copy-email'),async()=>{
 }));
 api('/api/registration/config').then(config=>{
   if(config.mode==='closed'){$('mode').textContent='Автор пока не открыл регистрацию. Если у тебя уже есть доступ, начни вход из игры.';return;}
-  $('registration-form').hidden=false;
+  $('registration-form').hidden=false;$('payment-question').hidden=config.mode!=='approval';
   $('mode').textContent=config.mode==='approval'?'Подготовь письмо с темой #verify и отправь его автору из своей почты. Автор рассмотрит заявку. Телефон будет проверен по SMS при входе.':'Подтверди телефон по SMS, чтобы получить свободный доступ. Доступные товары: '+config.products.join(', ')+'.';
   $('submit').textContent=config.mode==='approval'?'Подготовить письмо #verify':'Получить SMS-код';
 }).catch(e=>{$('mode').textContent='Не удалось загрузить настройки регистрации.';$('status').textContent=e.message;});

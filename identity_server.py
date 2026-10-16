@@ -182,7 +182,7 @@ class IdentityService:
         parsed=urlsplit(public_url)
         if parsed.scheme!='https' or not parsed.netloc or parsed.path not in ('','/') or parsed.query or parsed.fragment or parsed.username:
             raise RuntimeError('PUBLIC_BASE_URL must be an HTTPS origin without path')
-        self.db=database;self.provider=provider;self.public_url=public_url.rstrip('/');self.enabled=enabled;self.now=now;self.owner=owner;self.registration=None
+        self.db=database;self.provider=provider;self.public_url=public_url.rstrip('/');self.enabled=enabled;self.now=now;self.owner=owner;self.registration=None;self.security=None
         if owner:
             ident(owner.get('player'),32);phone(owner.get('phone'))
             if not valid_password_hash(owner.get('hash')):raise RuntimeError('Invalid OWNER_PASSWORD_HASH; use setup_secrets.py')
@@ -191,6 +191,7 @@ class IdentityService:
     def eligible(self,tx,player,product,certificate):
         row=tx.one('SELECT p.phone FROM players p JOIN certificates c ON c.player=p.id WHERE p.id=? AND c.product=? AND c.id=? AND p.active=1 AND c.active=1',(player,product,certificate))
         if row is None:raise Problem(403,'Игрок или сертификат не зарегистрирован. Обратитесь к автору игры.')
+        if self.security:self.security.guard(tx,player,product,certificate)
         return row['phone']
     def auth(self,tx,sid,token,kind):
         ident(sid,128)
@@ -198,6 +199,7 @@ class IdentityService:
         session=tx.session(sid)
         if session is None or not hmac.compare_digest(session[kind+'_hash'],digest(token)):raise Problem(403,'Нет доступа')
         number=self.eligible(tx,session['player'],session['product'],session['certificate'])
+        if self.security and session['state']=='verified' and session['expires']>self.now() and self.is_owner(session['player'],number):self.security.pin(tx,session['player'],session['product'],session['certificate'])
         return session,number
     def create(self,data,remote):
         player=ident(data.get('playerId'),32);product=ident(data.get('productId'));certificate=ident(data.get('certificateId'),128);nonce=ident(data.get('clientNonce'),128)
@@ -205,9 +207,12 @@ class IdentityService:
         with self.db.transaction() as tx:
             tx.limit('sessions:'+digest(remote),600,40,now)
             tx.limit('sessions-global',3600,300,now)
+        if self.security and data.get('grantType')=='developer' and (not self.owner or player!=self.owner['player']):
+            raise Problem(403,'Сертификат разработчика разрешён только аккаунту владельца.',{'code':'developer_claim_forbidden'})
         with self.db.transaction() as tx:
             try:number=self.eligible(tx,player,product,certificate)
             except Problem as error:
+                if error.details.get('code')=='developer_certificate_mismatch':raise
                 if self.registration and self.registration.settings(tx)['mode']!='closed':
                     raise Problem(403,'Откройте регистрацию игрока на сайте.',{'code':'registration_required','registrationUrl':self.public_url+'/register'}) from None
                 raise
@@ -268,6 +273,7 @@ class IdentityService:
         with self.db.transaction() as tx:
             self.eligible(tx,s['player'],s['product'],s['certificate'])
             if s['expires']<=self.now():raise Problem(400,'Срок проверки истёк')
+            if approved and self.security:self.security.pin(tx,s['player'],s['product'],s['certificate'])
             tx.execute('UPDATE sessions SET state=?,expires=? WHERE id=? AND state=?',
                 ('verified' if approved else 'password',int(self.now())+43200 if approved else s['expires'],sid,'checking_password'))
         if not approved:raise Problem(403,'Пароль неверен')
@@ -300,12 +306,13 @@ class IdentityService:
 class Application:
     def __init__(self,service):self.service=service
     def __call__(self,environ,start_response):
+        data={};result={};token=''
         try:
             path=environ.get('PATH_INFO','/');method=environ.get('REQUEST_METHOD','GET')
             headers=[('Cache-Control','no-store'),('X-Content-Type-Options','nosniff'),('Referrer-Policy','no-referrer'),
                      ('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")]
             static={'/':'index.html','/verify':'index.html','/verify.js':'verify.js','/verify.css':'verify.css',
-                    '/register':'register.html','/register.js':'register.js','/moderation':'moderation.html','/moderation.js':'moderation.js'}
+                    '/register':'register.html','/register.js':'register.js','/moderation':'moderation.html','/moderation.js':'moderation.js','/device.js':'device.js'}
             if method=='GET' and path in static:
                 file=static[path]
                 kind='text/html' if file.endswith('.html') else 'text/javascript' if file.endswith('.js') else 'text/css'
@@ -335,9 +342,14 @@ class Application:
                     else:raise Problem(405,'Метод не поддерживается')
                 else:raise Problem(404,'Не найдено')
                 raw=json.dumps(result,ensure_ascii=False).encode();headers.append(('Content-Type','application/json; charset=utf-8'));status=200
-        except Problem as error:status=error.status;raw=json.dumps({'error':error.message,**error.details},ensure_ascii=False).encode();headers=[('Content-Type','application/json; charset=utf-8'),('Cache-Control','no-store')]
+        except Problem as error:status=error.status;result={'error':error.message,**error.details};raw=json.dumps(result,ensure_ascii=False).encode();headers=[('Content-Type','application/json; charset=utf-8'),('Cache-Control','no-store')]
         except (ValueError,UnicodeError,KeyError):status=400;raw=b'{"error":"Invalid request"}';headers=[('Content-Type','application/json'),('Cache-Control','no-store')]
         except Exception:status=503;raw=b'{"error":"Service temporarily unavailable"}';headers=[('Content-Type','application/json'),('Cache-Control','no-store')]
+        if self.service.security:
+            try:self.service.security.observe(environ,data,status,result,token)
+            except Exception:
+                self.service.security.audit_failed=True
+                print('SECURITY AUDIT: event could not be recorded',flush=True)
         headers.append(('Content-Length',str(len(raw))));start_response(str(status)+' '+{200:'OK',400:'Bad Request',403:'Forbidden',404:'Not Found',405:'Method Not Allowed',409:'Conflict',413:'Payload Too Large',415:'Unsupported Media Type',429:'Too Many Requests',502:'Bad Gateway',503:'Service Unavailable'}.get(status,'Error'),headers)
         return [raw]
 
